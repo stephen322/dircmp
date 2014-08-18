@@ -3,6 +3,7 @@ dircmp
 
 Directory comparison utility
 
+```
 Compares directories 'a' against directories 'b'.  All files in 'a' will
 be categorized as a unique or duplicate file based on its presense in 'b'.
 This program implements a rdfind-like algorithm to reduce the amount of time
@@ -43,3 +44,4 @@ will be generated.
      Types to show in console when found.
      Available: unique, duplicate, duplicate-hardlink,
                 probable-unique, probable-duplicate, zero
+```
