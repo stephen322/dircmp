@@ -586,10 +586,10 @@ void runserver() {
 			switch (func) {
 			case "dirscan":
 				auto dir = j["dir"].str;
-				auto indexstart = j["indexstart"].uinteger;
+				auto indexstart = j["indexstart"].integer;
 				bool recurse = (j["recurse"].type == JSON_TYPE.TRUE) ? true : false;
 	
-				//writeln("data: ", dir, " ", recurse);
+				//writeln("data: ", indexstart, " ", dir, " ", recurse);
 				globalindex = cast(int)indexstart;
 				dirscan(false, dir, recurse);
 				auto endindex = globalindex;
@@ -688,7 +688,7 @@ void dirscan(bool doi, string dir, bool recursive) {
 		}
 	}
 	totalfiles+=numfiles;
-	log(format("%d files in %s", numfiles, dir));
+	log(format("%d (%s) files in %s", numfiles, doi?"A":"B", dir));
 	log(format("\t%d bytes.", totalsize));
 }
 
@@ -753,7 +753,7 @@ void remotedirscan(string host, bool doi, string dir, bool recurse) {
 	}
 
 	totalfiles+=numfiles;
-	log(format("%d files in %s", numfiles, host ~ ":" ~ dir));
+	log(format("%d (%s) files in %s", numfiles, doi?"A":"B", host ~ ":" ~ dir));
 	log(format("\t%d bytes.", totalsize));
 }
 
