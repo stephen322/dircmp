@@ -1,9 +1,8 @@
 /*  TODO
 -output parsable text for GUIs
--TESTS!
 -diff device concurrency
 -output multiple duplicate matches
--don't record mismatched sizes on load to save memory?
+-treat symlinks as files
 */
 
 import std.stdio;
@@ -68,6 +67,25 @@ int countlinkdup;
 //"duplicate" => index => dupkey
 dbIndex[dbIndex][string] results;
 dbIndex[dbIndex][string] extraresults;
+dbIndex[dbIndex][string] testresults;
+dbIndex[dbIndex][string] testextraresults;
+
+//struct GlobalOptions {
+	bool noprogressbar;
+	bool quiet;
+	bool[string] stdouttypes;
+	bool noresults;
+	string fileprefix;
+	File filelog;
+	string resultsdir, delim;
+//}
+//GlobalOptions options;
+
+enum probables { name, time, nameandtime, none };
+probables probs = probables.nameandtime;
+
+bool skipmd5 = false;
+
 
 
 int ctrlc;
@@ -117,7 +135,6 @@ unittest {
 
 //alias Hardlink = Tuple!(dev_t, ino_t);
 alias MHardlink = Tuple!(ubyte, dev_t, ino_t);	//machine,dev,inode
-
 
 
 
@@ -267,7 +284,7 @@ class SetIter {
 		}
 			
 		while(sortby.equal(sortedkeys[pos], sortedkeys[pos+1])) {
-			assert( sortby.equalbyless(sortedkeys[pos], sortedkeys[pos+1]) );
+			//assert( sortby.equalbyless(sortedkeys[pos], sortedkeys[pos+1]) );
 			++pos;
 			if ( (pos+1) >= sortedkeys.length) break;
 		}
@@ -337,20 +354,6 @@ dbIndex[][bool] splitdirs(dbIndex[] keys) {
 	return dirsplit;
 }
 
-
-
-
-
-//struct GlobalOptions {
-	bool noprogressbar;
-	bool quiet;
-	bool[string] stdouttypes;
-	bool noresults;
-	string fileprefix;
-	File filelog;
-	string resultsdir, delim;
-//}
-//GlobalOptions options;
 
 void log(S...)(S args) {
 	if (!quiet)
@@ -433,7 +436,7 @@ void outputstats(ulong afiles, string dir=null, string delim="\t") {
 		}
 	}
 
-	if (extraresults["checkcorrupt"].length) {
+	if (!noresults && dir!=null && extraresults["checkcorrupt"].length) {
 		auto f = File(dir ~ fileprefix ~ "checkcorrupt.txt", "w");
 		foreach(k,v; extraresults["checkcorrupt"])
 			f.writeln(tohostpath(k), delim, tohostpath(v));
@@ -656,7 +659,10 @@ void runserver() {
 }
 
 
-
+void runtest(string path) {
+	readdump(true, path, 0, true);
+	dball.rehash;
+}
 
 
 //TODO: permissions exception
@@ -692,6 +698,37 @@ void dirscan(bool doi, string dir, bool recursive) {
 	log(format("\t%d bytes.", totalsize));
 }
 
+void singlefilescan(string filename) {
+	ulong totalsize=0;
+	
+	auto e = DirEntry(filename);
+	auto a = e.linkAttributes();
+
+	if (!attrIsSymlink(a) && attrIsFile(a)) {
+		auto tmp = e.statBuf();
+		dball[globalindex] = dbentry.init;
+		with (dball[globalindex]) {
+			path = e.name();
+			//mtime = e.timeLastModified();
+			mtime = tmp.st_mtime;
+			device = tmp.st_dev;
+			inode = tmp.st_ino;
+			size = tmp.st_size;
+			dir1 = true;
+
+			totalsize += size;
+		}
+		++leftfiles;
+		++globalindex;
+		totalfiles++;
+		log(format("(A) file: %s", e.name()));
+		log(format("\t%d bytes.", totalsize));
+	}
+	else {
+		logf("Error on %s", filename);
+	}
+}
+
 void remotedirscan(string host, bool doi, string dir, bool recurse) {
 	ulong numfiles=0, totalsize=0;
 	long result=-999;
@@ -700,9 +737,13 @@ void remotedirscan(string host, bool doi, string dir, bool recurse) {
 	if (rsh_cmd == null)
 		rsh_cmd = "ssh -C %H dircmp --server";
 
-
+	string rsh;
 	auto hostreplace = ctRegex!(`%H`,"g");
-	string rsh = replaceAll(rsh_cmd, hostreplace, host);
+	if (match(rsh_cmd, hostreplace))
+		rsh = replaceAll(rsh_cmd, hostreplace, host);
+	else
+		rsh = rsh_cmd ~ " " ~ host ~ " dircmp --server";
+
 	auto pipes = pipeShell(rsh);
 	machinedb ~= hostdbentry(host,pipes);
 	//scope(exit) wait(pipes.pid);
@@ -729,11 +770,11 @@ void remotedirscan(string host, bool doi, string dir, bool recurse) {
 		dbentry dbe;
 		with (dbe) {
 			//path = host ~ ":" ~ j["path"].str;
-			path = j["path"].str;
-			mtime = cast(time_t) j["mtime"].uinteger;
-			device = cast(dev_t) j["device"].uinteger;
-			inode = cast(ino_t) j["inode"].uinteger;
-			size = cast(ulong) j["size"].uinteger;
+			path = ccunescape(j["path"].str);
+			mtime = cast(time_t) j["mtime"].integer;
+			device = cast(dev_t) j["device"].integer;
+			inode = cast(ino_t) j["inode"].integer;
+			size = cast(ulong) j["size"].integer;
 
 			dir1 = doi;
 			machine = cast(ubyte)(machinedb.length - 1);
@@ -757,37 +798,83 @@ void remotedirscan(string host, bool doi, string dir, bool recurse) {
 	log(format("\t%d bytes.", totalsize));
 }
 
-void readdump(bool doi, string file, ubyte machnum=1) {
+void readdump(bool doi, string file, ubyte machnum=1, bool testmode=false) {
 	ulong numfiles=0;
 	ulong totalsize=0;
 
 	auto f = File(file,"r");
 	string line;
 
-	while ((line = f.readln()) !is null) {
-		auto j = parseJSON(line);
+	/*
+	if (!testmode) {
+		assert(machnum == machinedb.length);
+		machinedb ~= hostdbentry.init;
+		machinedb[machnum].hostname = file;
+	}
+	*/
 
-		dball[globalindex] = dbentry.init;
-		//sigh...the ugly way
-		with (dball[globalindex]) {
-			path = j["path"].str;
-			mtime = cast(time_t) j["mtime"].uinteger;
-			device = cast(dev_t) j["device"].uinteger;
-			inode = cast(ino_t) j["inode"].uinteger;
-			size = cast(ulong) j["size"].uinteger;
+	while ((line = f.readln()) !is null) {
+		try {
+		auto j = parseJSON(line);
+		auto index = globalindex;
+		
+		if ("testfile" in j.object) {
+			if ("probables" in j.object) {
+				string p = j["probables"].str;
+				switch(p) {
+					case "name":	probs = probables.name; break;
+					case "time":	probs = probables.time; break;
+					case "nameandtime": probs = probables.nameandtime; break;
+					case "none":	probs = probables.none; break;
+					default: stderr.writeln("Unknown probables type.");
+				}
+			}
+			if ("skipmd5" in j.object) skipmd5 = j["skipmd5"].type == JSON_TYPE.TRUE ? true : false;
+			continue;
+		}
+		if ("test" in j.object) {
+			auto id = cast(dbIndex) j["test"].integer;
+			dbIndex k2 = ("key2" in j.object) ? cast(dbIndex)j["key2"].integer : -1;
+			testresults[j["result"].str][id] = k2;
+			continue;
+		}
+		if ("testextra" in j.object) {
+			auto id = cast(dbIndex) j["testextra"].integer;
+			dbIndex ek2 = ("ekey2" in j.object) ? cast(dbIndex)j["ekey2"].integer : -1;
+			testextraresults[j["extraresult"].str][id] = ek2;
+			continue;
+		}
+
+		if (testmode && "index" in j.object) index = cast(dbIndex)j["index"].integer;
+
+		dball[index] = dbentry.init;
+		with (dball[index]) {
+			assert("path" in j.object);
+			path = ccunescape(j["path"].str);
+			mtime = cast(time_t) j["mtime"].integer;
+			device = cast(dev_t) j["device"].integer;
+			inode = cast(ino_t) j["inode"].integer;
+			size = cast(ulong) j["size"].integer;
 			/*
 			foreach(i,m; j["mid"].array) 
 				mid[i] = cast(ubyte)m.uinteger;
 			foreach(i,m; j["md5"].array) 
 				md5[i] = cast(ubyte)m.uinteger;
 			*/
-			hextoubyte(j["mid"].str, mid);
-			hextoubyte(j["md5"].str, md5);
-			midfilled = cast(ubyte) j["midfilled"].uinteger;
+			if ("mid" in j.object) hextoubyte(j["mid"].str, mid);
+			if ("md5" in j.object) hextoubyte(j["md5"].str, md5);
+			midfilled = cast(ubyte) j["midfilled"].integer;
 			md5filled = j["md5filled"].type == JSON_TYPE.TRUE ? true : false;
 
 			dir1 = doi;
 			machine = machnum;
+
+			//needed for tests
+			if (testmode && "dir1" in j.object) {
+				dir1 = j["dir1"].type == JSON_TYPE.TRUE ? true : false;
+				doi = dir1;
+			}
+			if (testmode && "machine" in j.object) machine = cast(ubyte)j["machine"].integer;
 
 			totalsize+=size;
 		}
@@ -796,6 +883,10 @@ void readdump(bool doi, string file, ubyte machnum=1) {
 		else ++rightfiles;
 		//writeln(dball[globalindex]);
 		++globalindex;
+		} catch(Exception e) {
+			writefln("numfile: %d  Error: %s", numfiles, e.msg);
+		}
+		
 	}
 	totalfiles+=numfiles;
 	log(format("%d files in %s", numfiles, file));
@@ -905,7 +996,7 @@ void midscanall(dbIndex[] keys, int midsize, void delegate(dbIndex) dg = null) {
 				if ("midmd5" in j.object) {
 					dbIndex k = cast(dbIndex) j["key"].integer;
 					hextoubyte(j["midmd5"].str, dball[k].mid);
-					dball[k].midfilled = cast(ubyte) j["midfilled"].uinteger;
+					dball[k].midfilled = cast(ubyte) j["midfilled"].integer;
 
 					if (midsize >= dball[k].size) {
 						assert("md5filled" in j.object);
@@ -971,7 +1062,7 @@ void md5sumcmd(dbIndex k, ref double sizesum, double totalsize) {
 
 	import std.process;
 	auto md5sum = execute(["md5sum", dball[k].path]);
-	if (md5sum.status != 0) throw new Exception("md5sum failed.");;
+	if (md5sum.status != 0) throw new Exception("md5sum failed.");
 	string s = md5sum.output[0..32];
 	
 	hextoubyte(s, dball[k].md5);
@@ -986,6 +1077,9 @@ void hextoubyte(string str, ref ubyte[16] target) {
 		target[i/2] = to!ubyte(str[i..i+2],16);
 }
 
+/** Finds the closest path matching name in klist to k1
+    by matching basename then finding longest matching path
+*/
 dbIndex NameMatch(dbIndex k1, dbIndex[] klist) {
 	if (klist.length==1) return klist[0];
 
@@ -1016,13 +1110,99 @@ dbIndex NameMatch(dbIndex k1, dbIndex[] klist) {
 	}
 	//writeln(klist.length, " ", closest==-1?"NO  ":"YES ", dball[k1].path, "\t", dball[closest==-1?klist[0]:closest].path);
 
-	if (closest < 0) return klist[0];
+	if (closest < 0) return klist[0];	//no basename match
 	return closest;
 }
 
+/** Handle illegal json chars (not actually illegal, but most json's can't handle it?)
+	Replace all control characters with #XX where XX is it's hex representation
+	Needed for linux filenames which can contain just about anything.
+	ext mode for linux-byte <-> json utf8 if filename not in utf8 space
+*/
+string ccescape(string s, bool ext=false) {
+	auto app = appender!string();
+	foreach(char c; s) {
+		if (c < 32 || (ext && c > 127))
+			app.put( format("#x%02X",c) );
+		else if (c == '#')
+			app.put("##");
+		else
+			app.put(c);
+	}
+	return app.data;
+}
+unittest {
+	assert(ccescape("hello")==`hello`);
+	assert(ccescape("\x05hello")==`#x05hello`);
+	assert(ccescape("hello\x05")==`hello#x05`);
+	assert(ccescape("\x00")==`#x00`);
+	assert(ccescape("\x19")==`#x19`);
+	assert(ccescape("\x20")==" ");
+	assert(ccescape(`\x19`)==`\x19`);
+	assert(ccescape(`#x19`)==`##x19`);
+	assert(ccescape("\xFF",false)=="\xFF");
+	assert(ccescape("\xFF",true)=="#xFF");
+}
+
+string ccunescape(string s) {
+	auto app = appender!string();
+	
+	char state = 0;
+	for(int i=0; i<s.length; i++) {
+		char c = s[i];
+		if (state=='#') {
+			if (c == '#')
+				app.put('#');
+			else if (c == 'x') {
+				app.put( to!ubyte(s[i+1..i+3], 16) );
+				i+=2;
+			}
+			else //throw new Exception("Original string wasn't escaped");
+				app.put("#" ~ c);
+			
+			state=0;
+			continue;
+		}
+		
+		//state == 0
+		if (c == '#') {
+			state = '#';
+			continue;
+		}
+		else app.put(c);
+	}
+	
+	if(state=='#') app.put('#');
+	return app.data;
+}
+unittest {
+	assert(ccunescape("hello")=="hello");
+	assert(ccunescape(`#x05hello`)=="\x05hello");
+	assert(ccunescape(`hello#x05`)=="hello\x05");
+	assert(ccunescape(`#x00`)=="\x00");
+	assert(ccunescape(`#x19`)=="\x19");
+
+	assert(ccunescape(`\x19`)==`\x19`);
+	assert(ccunescape(`##x19`)==`#x19`);
+
+	assert(ccunescape(`##`)==`#`);
+	assert(ccunescape(`####`)==`##`);
+	assert(ccunescape(`####z`)==`##z`);
+}
+
 string jsonescape(string s) {
+	try {
+		std.utf.validate(s);
+		s = ccescape(s,false);
+	} catch (std.utf.UTFException e) {
+		s = ccescape(s,true);
+	}
+
 	static auto esc = ctRegex!(`(?=[\\"])`,"g");
-	return replaceAll(s, esc, "\\");
+	return replaceAll(s, esc, `\`);
+}
+unittest {
+	assert(jsonescape("\xFF")=="#xFF");
 }
 
 string tohostpath(dbIndex k) {
@@ -1030,6 +1210,106 @@ string tohostpath(dbIndex k) {
 	if(m>0) return machinedb[m].hostname ~ ":" ~ dball[k].path;
 	else return dball[k].path;
 }
+
+string writeobj(string member)(dbentry e) {
+	string s;
+	s = `"` ~ member ~ `": `;
+
+	static if ( is(typeof(__traits(getMember, e, member)) == string) )
+		s ~= `"` ~ __traits(getMember, e, member) ~ `"`;
+	else static if ( is(typeof(__traits(getMember, e, member)) == ubyte[16]) ) {
+		s ~= `"` ~ toHexString(__traits(getMember, e, member)) ~ `"`;
+		/*
+		writeln("\nbegin");
+		writeln("orig: ", __traits(getMember, e, member));
+		string test = toHexString(__traits(getMember, e, member));
+		writeln("hex: ", test);
+		ubyte[16] a,b;
+		for(int i=0; i<32; i+=2)
+			a[i/2] = to!ubyte(test[i..i+2],16);
+		writeln("back: ", a);
+		hextoubyte(test,b);
+		writeln("func: ", b);
+		*/
+	}
+	else
+		s ~= to!string(__traits(getMember, e, member));
+
+	return s;
+}
+
+void outputjson() {
+	auto filename = resultsdir ~ fileprefix ~ "json";
+	log("Dumping json data to ", filename);
+	auto w = File(filename,"w");
+	w.writefln(`{ "testfile":"generated", "skipmd5":%s, "probables":"%s" }`, 
+		skipmd5?"true":"false", probs);
+	foreach(k,e; dball) {
+		string s;
+		string[] pairs = [
+			format("%s%d", `"index":`, k),
+			writeobj!"dir1"(e),
+			format("%s%s%s", `"path":"`, jsonescape(e.path), `"`),
+			writeobj!"mtime"(e),
+			writeobj!"device"(e),
+			writeobj!"inode"(e),
+			writeobj!"size"(e),
+			writeobj!"mid"(e),
+			writeobj!"md5"(e),
+			writeobj!"midfilled"(e),
+			writeobj!"md5filled"(e) ];
+		s = pairs.join(", ");
+		w.writeln("{" ~ s ~ "}");
+	}
+	foreach(typ,lup; results) {
+		foreach(k,v; lup)
+			w.writefln(`{ "test":%d, "result":"%s", "key2":%d }`, k, typ, v);
+	}
+	foreach(typ,lup; extraresults) {
+		foreach(k,v; lup)
+			w.writefln(`{ "testextra":%d, "extraresult":"%s", "ekey2":%d }`, k, typ, v);
+	}
+}
+
+void testoutput(string testpath) {
+	int passedtotal,testtotal;
+	foreach(typ,lup; testresults) {
+		int passed=0, typtotal=0;
+		foreach(k,v; lup) {
+			typtotal++;
+			//don't check key2 for now, multiple correct answers
+			//TODO: check and make sure key2 is a valid answer
+			//if (k in results[typ] && results[typ][k] == v)
+			if (k in results[typ])
+				passed++;
+			//else
+				//writefln("Failed: %d %d - %s - %s", k,v, (k in dball) ? dball[k].path : "ERROR", typ);
+		}
+		writefln("%s: %d/%d %s", typ, passed, typtotal, passed==typtotal?"Passed":"Failed");
+		passedtotal+=passed;
+		testtotal+=typtotal;
+	}
+	foreach(typ,lup; testextraresults) {
+		int passed=0, typtotal=0;
+		foreach(k,v; lup) {
+			typtotal++;
+			if (k in extraresults[typ] && extraresults[typ][k] == v)
+				passed++;
+			else
+				writefln("Failed: %d %d - %s - %s", k,v, dball[k].path, typ);
+		}
+		writefln("%s: %d/%d %s", typ, passed, typtotal, passed==typtotal?"Passed":"Failed");
+		passedtotal+=passed;
+		testtotal+=typtotal;
+	}
+	writefln("%s: %d/%d %s", testpath, passedtotal, testtotal, passedtotal==testtotal?"PASSED":"FAILED");
+	if(passedtotal==testtotal) exit(0);
+	else exit(testtotal-passedtotal);
+}
+
+
+
+
 
 
 
@@ -1045,26 +1325,31 @@ int main(string[] args) {
 	stdouttypes = ["unique":false, "probable-unique":false, "duplicate":false, "probable-duplicate":false];
 	string[] consoleshowtypes;
 
-	enum probables { name, time, nameandtime, none };
-	probables probs = probables.nameandtime;
-	
 	uint midsize = 4096;
 	
 	bool server = false;
 	bool finddupsearly = false;
-	bool skipmd5 = false;
+	skipmd5 = false;
 	bool iknowwhatimdoing = false;
+	bool jsonresults = false;
 	noresults = false;
 	quiet = false;
 	noprogressbar = false;
 	fileprefix = "dircmp-results.";
 	resultsdir = "./";
 	delim = "\t";
-	string[] leftdirs,rightdirs,leftrdirs,rightrdirs,afiles,bfiles;
+	string[] leftdirs,rightdirs,leftrdirs,rightrdirs,afiles,bfiles,a1files;
 	string[] dumpndirs,dumprdirs;
 	string dumpfile = "dircmp.dump";
+	string testpath;
 
 	noprogressbar = false;
+	
+	
+	machinedb ~= hostdbentry.init;	//machinedb[0] reserved
+	auto hasHost = ctRegex!(`^([^/\\]+):(.+$)`);
+
+	
 	
 	void helpoutput() {
 		writeln("\nUsage:");
@@ -1122,6 +1407,7 @@ EOS");
 		"consoleshow|c",&consoleshowtypes,
 		"quiet|q",&quiet,
 		"noprogressbar",&noprogressbar,
+		"a1",&a1files,
 		"an",&leftdirs,
 		"bn",&rightdirs,
 		"ar", &leftrdirs,
@@ -1134,18 +1420,27 @@ EOS");
 		"noresults", &noresults,
 		"resultsdir", &resultsdir,
 		"delim", &delim,
-		//"symfile", &symfile,
-		//"symdir", &symdir,
 		"dumpn", &dumpndirs,
 		"dumpr", &dumprdirs,
 		"dumpfile", &dumpfile,
 		"iknowwhatimdoing", &iknowwhatimdoing,
-		//std.getopt.config.caseInsensitive)
 		"server", &server,
+		"runtest", &testpath,
+		"jsonresults|json", &jsonresults,
+		//std.getopt.config.caseInsensitive)
 		std.getopt.config.caseSensitive);
 	
 	if (server) runserver();
 
+	if (testpath) {
+		//quiet=true;
+		noprogressbar=true;
+		noresults=true;
+		resultsdir = "";
+		runtest(testpath);
+		goto startcomparison;
+	}
+	
 	if(resultsdir[$-1] != '/')
 		resultsdir ~= '/';
 	if(noresults || dumpndirs.length || dumprdirs.length) {
@@ -1158,8 +1453,7 @@ EOS");
 
 	foreach(c; consoleshowtypes)
 		stdouttypes[c] = true;
-
-
+	
 	if (dumpndirs.length + dumprdirs.length > 0) {
 		dbIndex[] keys;
 
@@ -1212,33 +1506,6 @@ EOS");
 		}
 		writeln();
 
-		string writeobj(string member)(dbentry e) {
-			//auto val = __traits(getMember, e, member);
-			string s;
-			s = `"` ~ member ~ `": `;
-
-			static if ( is(typeof(__traits(getMember, e, member)) == string) )
-				s ~= `"` ~ __traits(getMember, e, member) ~ `"`;
-			else static if ( is(typeof(__traits(getMember, e, member)) == ubyte[16]) ) {
-				s ~= `"` ~ toHexString(__traits(getMember, e, member)) ~ `"`;
-				/*
-				writeln("\nbegin");
-				writeln("orig: ", __traits(getMember, e, member));
-				string test = toHexString(__traits(getMember, e, member));
-				writeln("hex: ", test);
-				ubyte[16] a,b;
-				for(int i=0; i<32; i+=2)
-					a[i/2] = to!ubyte(test[i..i+2],16);
-				writeln("back: ", a);
-				hextoubyte(test,b);
-				writeln("func: ", b);
-				*/
-			}
-			else
-				s ~= to!string(__traits(getMember, e, member));
-
-			return s;
-		}
 
 		//output to newline seperated json objects...for now
 
@@ -1246,7 +1513,7 @@ EOS");
 		foreach(k,e; dball) {
 			string s;
 			string[] pairs = [
-				writeobj!"path"(e),
+				format("%s%s%s", `"path":"`, jsonescape(e.path), `"`),
 				writeobj!"mtime"(e),
 				writeobj!"device"(e),
 				writeobj!"inode"(e),
@@ -1261,12 +1528,12 @@ EOS");
 		std.c.stdlib.exit(0);
 	}
 
-	if (leftdirs.length + leftrdirs.length + afiles.length == 0) {
-		writeln("Need at least one Directory of Interest (--an or --ar argument)");
+	if (leftdirs.length + leftrdirs.length + afiles.length + a1files.length == 0) {
+		writeln("Need at least one Directory of Interest (--an or --ar argument).  See --help.");
 		std.c.stdlib.exit(-1);
 	}
 	if (rightdirs.length + rightrdirs.length + bfiles.length == 0) {
-		writeln("Need at least one Comparison Directory (--bn or --br argument)");
+		writeln("Need at least one Comparison Directory (--bn or --br argument).  See --help.");
 		std.c.stdlib.exit(-1);
 	}
 	/*
@@ -1280,11 +1547,9 @@ EOS");
 		std.c.stdlib.exit(-1);
 	}
 
-
-	machinedb ~= hostdbentry.init;	//machinedb[0] reserved
-	ulong oldcount;
-
-	auto hasHost = ctRegex!(`^([^/\\]+):(.+$)`);
+	foreach(f;a1files) {
+		singlefilescan(f);
+	}
 
 	foreach (dir;leftdirs) {
 		if (auto m = match(dir,hasHost)) remotedirscan(m.captures[1], true, m.captures[2], false);
@@ -1302,8 +1567,8 @@ EOS");
 		if (auto m = match(dir,hasHost)) remotedirscan(m.captures[1], false, m.captures[2], true);
 		else dirscan(false, dir, true);
 	}
-	foreach (file;afiles) readdump(true, file);
-	foreach (file;bfiles) readdump(false, file);
+	foreach (file;afiles) readdump(true, file, 0);
+	foreach (file;bfiles) readdump(false, file, 0);
 	
 	dball.rehash;
 
@@ -1329,8 +1594,11 @@ Check corrupt (if done md5sum):
 -same: size,mid-md5,filename?,time?, but diff md5
 
 */
-	int[2] count;
+startcomparison:
 
+	int[2] count;
+	ulong oldcount;
+	
 	dbIndex[] keys = dball.keys;
 	log(keys.length, " total files.\n");
 
@@ -1380,10 +1648,7 @@ Check corrupt (if done md5sum):
 	harddb.rehash;
 
 	count = removeflagged(keys);
-/*
-	log(count, " hardlinks removed from consideration.  ", results["duplicate-hardlink"].length, " from dir1.");
-	log(countdeferred, " of them to be evaluated later.");
-*/
+
 	assert(count[1]==0);
 	log(count[0], " hardlinked duplicates.  ", keys.length, " files left in workset.");
 
@@ -1525,10 +1790,11 @@ Check corrupt (if done md5sum):
 		logf("%d probably-duplicate.", results["probable-duplicate"].length);
 		log();
 	}
-
-
+	
 	if(skipmd5) {
 		outputstats(leftfiles,resultsdir,delim);
+		if (testpath) testoutput(testpath);
+		if (jsonresults) outputjson();
 		std.c.stdlib.exit(0);
 	}
 
@@ -1590,7 +1856,6 @@ md5search:
 		//skipflagged
 		if (dball[k].flag) {
 			assert(dball[k].dir1 == false);
-			totalsize -= dball[k].size;
 			//logf("Removed from scan: %s - %d kbytes", dball[k].path, dball[k].size/1000);
 			continue;
 		}
@@ -1667,13 +1932,21 @@ md5search:
 			foreach(i; midhashdb[b][true])
 				if (i !in results["duplicate"])
 					continue md5search;	//there's still 1f or 1e present...can't remove 2e
+			
+			long[MHardlink] toremove;
 			foreach (dn; midhashdb[b][false]) {
 				dball[dn].flag=true;
 				if (!dball[dn].md5filled) {
 					++c;
+					//calc removed size
+					auto hlkey = MHardlink(dball[dn].machine, dball[dn].device, dball[dn].inode);
+					toremove[hlkey] = dball[dn].size;
 					//writeln(dball[dn].path);
 				}
 			}
+			foreach(uniq,sz; toremove)
+				totalsize -= sz;
+			toremove=null;
 		}
 	}
 	renderprogress(sizesum/1000000, totalsize/1000000, "MB");
@@ -1710,6 +1983,9 @@ md5search:
 	}
 
 	outputstats(leftfiles, resultsdir, delim);
-
+	
+	if (testpath) testoutput(testpath);
+	if (jsonresults) outputjson();
+	
 	return 0;
 }

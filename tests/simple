@@ -1,0 +1,20 @@
+{"testfile":"basic"}
+{"index":0, "dir1":true,  "path": "./dir1/file1", "mtime": 111, "device": 222, "inode": 33333333, "size": 1234, "midfilled": 0, "md5filled": false}
+{"index":1, "dir1":false, "path": "./dir2/file1", "mtime": 111, "device": 222, "inode": 33333333, "size": 1234, "midfilled": 0, "md5filled": false}
+{"index":2, "dir1":true,  "path": "./dir1/file2", "mtime": 111, "device": 222, "inode": 10, "size": 1, "mid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "md5": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "midfilled": 1, "md5filled": true}
+{"index":3, "dir1":false, "path": "./dir2/file2", "mtime": 111, "device": 222, "inode": 11, "size": 1, "mid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "md5": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "midfilled": 1, "md5filled": true}
+{"index":4, "dir1":true,  "path": "./dir1/file3", "mtime": 111, "device": 222, "inode": 20, "size": 500000, "mid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA11", "md5": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB11", "midfilled": 1, "md5filled": true}
+{"index":5, "dir1":false, "path": "./dir2/file3", "mtime": 111, "device": 222, "inode": 21, "size": 500000, "mid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA11", "md5": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBB11", "midfilled": 1, "md5filled": true}
+{"index":6, "dir1":true,  "path": "./dir1/file4", "mtime": 111, "device": 222, "inode": 30, "size": 12340, "mid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "md5": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", "midfilled": 1, "md5filled": true}
+{"index":7, "dir1":false, "path": "./dir2/file4", "mtime": 111, "device": 222, "inode": 31, "size": 12340, "mid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "md5": "BBBBBBBBBBBBBBBBBFFFFFFFFFFFFFFF", "midfilled": 1, "md5filled": true}
+{"index":8, "dir1":true,  "path": "./dir1/file5", "mtime": 111, "device": 222, "inode": 40, "size": 123450, "mid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "midfilled": 1, "md5filled": false}
+{"index":9, "dir1":false, "path": "./dir2/file5", "mtime": 111, "device": 222, "inode": 41, "size": 123450, "mid": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAFFF", "midfilled": 1, "md5filled": false}
+{"index":10, "dir1":true, "path": "./dir1/file6", "mtime": 111, "device": 222, "inode": 50, "size": 333, "midfilled": 0, "md5filled": false}
+{"index":11, "dir1":false,"path": "./dir2/file6", "mtime": 111, "device": 222, "inode": 51, "size": 444, "midfilled": 0, "md5filled": false}
+{"test":0, "result":"duplicate-hardlink", "key2":1}
+{"test":2, "result":"duplicate", "key2":3}
+{"test":4, "result":"duplicate", "key2":5}
+{"test":6, "result":"unique"}
+{"test":8, "result":"unique"}
+{"test":10, "result":"unique"}
+{"testextra":6, "extraresult":"checkcorrupt", "ekey2":7}
