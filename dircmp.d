@@ -7,16 +7,16 @@
 
 import std.stdio;
 import std.file;
-import core.sys.posix.sys.stat;  // for stat_t: dev_t ino_t time_t
+import core.sys.posix.sys.stat : stat_t;
 import std.datetime;
 import std.algorithm;
 import std.array;
 import std.digest.md;
-import std.path;	//baseName
+import std.path : baseName, isValidPath;
 import std.string;
 import core.sys.posix.signal;
 import std.getopt;
-import std.c.stdlib;	//exit
+import std.c.stdlib : exit;
 import std.bitmanip;
 import std.parallelism;
 import std.conv;
@@ -1060,7 +1060,7 @@ void md5file(dbIndex k, ref double sizesum, double totalsize) {
 void md5sumcmd(dbIndex k, ref double sizesum, double totalsize) {
 	if (dball[k].md5filled) return;
 
-	import std.process;
+	import std.process : execute;
 	auto md5sum = execute(["md5sum", dball[k].path]);
 	if (md5sum.status != 0) throw new Exception("md5sum failed.");
 	string s = md5sum.output[0..32];
