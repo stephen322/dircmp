@@ -1401,35 +1401,40 @@ EOS");
 		std.c.stdlib.exit(-1);
 	}
 
-	getopt(args,
-		"help|h", std.functional.toDelegate(&helpoutput),
-		"finddupsearly|ssd",&finddupsearly,
-		"consoleshow|c",&consoleshowtypes,
-		"quiet|q",&quiet,
-		"noprogressbar",&noprogressbar,
-		"a1",&a1files,
-		"an",&leftdirs,
-		"bn",&rightdirs,
-		"ar", &leftrdirs,
-		"br", &rightrdirs,
-		"af", &afiles,
-		"bf", &bfiles,
-		"skipmd5", &skipmd5,
-		"probables", &probs,
-		"midsize|ms", &midsize,
-		"noresults", &noresults,
-		"resultsdir", &resultsdir,
-		"delim", &delim,
-		"dumpn", &dumpndirs,
-		"dumpr", &dumprdirs,
-		"dumpfile", &dumpfile,
-		"iknowwhatimdoing", &iknowwhatimdoing,
-		"server", &server,
-		"runtest", &testpath,
-		"jsonresults|json", &jsonresults,
-		//std.getopt.config.caseInsensitive)
-		std.getopt.config.caseSensitive);
-	
+	try {
+		getopt(args,
+			"help|h", std.functional.toDelegate(&helpoutput),
+			"finddupsearly|ssd",&finddupsearly,
+			"consoleshow|c",&consoleshowtypes,
+			"quiet|q",&quiet,
+			"noprogressbar",&noprogressbar,
+			"a1",&a1files,
+			"an",&leftdirs,
+			"bn",&rightdirs,
+			"ar", &leftrdirs,
+			"br", &rightrdirs,
+			"af", &afiles,
+			"bf", &bfiles,
+			"skipmd5", &skipmd5,
+			"probables", &probs,
+			"midsize|ms", &midsize,
+			"noresults", &noresults,
+			"resultsdir", &resultsdir,
+			"delim", &delim,
+			"dumpn", &dumpndirs,
+			"dumpr", &dumprdirs,
+			"dumpfile", &dumpfile,
+			"iknowwhatimdoing", &iknowwhatimdoing,
+			"server", &server,
+			"runtest", &testpath,
+			"jsonresults|json", &jsonresults,
+			//std.getopt.config.caseInsensitive)
+			std.getopt.config.caseSensitive);
+	} catch(Exception e) {
+		stderr.writeln(e.msg);
+		return 1;
+	}
+
 	if (server) runserver();
 
 	if (testpath) {
