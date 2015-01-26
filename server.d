@@ -13,9 +13,9 @@ import scanschecksums;
 
 
 void runserver() {
-	quiet = true;
-	noresults = true;
-	//noprogressbar = true;
+	options.quiet = true;
+	options.noresults = true;
+	//options.noprogressbar = true;
 	renderprogress = &progress_json;
 	try {
 		string line;
@@ -69,8 +69,8 @@ void processinst(JSONValue j) {
 		}
 		break;
 	case "midscan":
-		auto progbarbak = noprogressbar;
-		noprogressbar = true;
+		auto progbarbak = options.noprogressbar;
+		options.noprogressbar = true;
 		auto appkeys = appender!(dbIndex[])();
 		foreach(jv; j["keys"].array)
 			appkeys.put(cast(dbIndex)jv.integer);
@@ -84,7 +84,7 @@ void processinst(JSONValue j) {
 		midscanall(appkeys.data, ms, &writemidjson);
 		writeln(`{ "result": 0 }`);
 		stdout.flush();
-		noprogressbar = progbarbak;
+		options.noprogressbar = progbarbak;
 		break;
 	case "md5file":
 		dbIndex k = cast(dbIndex) j["key"].integer;

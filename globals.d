@@ -44,28 +44,37 @@ alias int dbIndex;
 
 __gshared dbentry[dbIndex] dball;
 dbIndex globalindex = 0;
-ulong leftfiles, rightfiles;
-ulong totalfiles;
+ulong numafiles;
 
 struct hostdbentry {
 	string hostname;
 	ProcessPipes conn;
+	int index;
 }
 
 hostdbentry[] machinedb;
+ubyte[string] machlu;
 
 
-//struct GlobalOptions {
+struct GlobalOptions {
 	bool noprogressbar;
 	bool quiet;
 	bool[string] stdouttypes;
 	bool noresults;
+	bool cache;
+	string resultsdir;
 	string fileprefix;
-	File filelog;
-	string resultsdir, delim;
+	string delim;
 	bool skipmd5;
-//}
-//GlobalOptions options;
+	uint midsize;
+}
+GlobalOptions options;
+
+File filelog;
+
+enum probables { name, time, nameandtime, none };
+probables probs = probables.nameandtime;
+
 
 
 //duptype => index => extrakey
@@ -75,10 +84,6 @@ dbIndex[dbIndex][string] results;
 dbIndex[dbIndex][string] extraresults;
 dbIndex[dbIndex][string] testresults;
 dbIndex[dbIndex][string] testextraresults;
-
-
-enum probables { name, time, nameandtime, none };
-probables probs = probables.nameandtime;
 
 
 
@@ -119,6 +124,7 @@ unittest {
 	// ... insert other tests here
 }
 
+dbentry[MHardlink] md5cachedb;
 
 dbIndex[][MHardlink] harddb; //mach-dev-inode => [key1, keyn...]
 int countlinkuniq;
@@ -128,9 +134,9 @@ int countlinkdup;
 
 
 void log(S...)(S args) {
-	if (!quiet)
+	if (!options.quiet)
 		writeln(args);
-	if (!noresults)
+	if (!options.noresults)
 		filelog.writeln(args);
 }
 
@@ -144,6 +150,45 @@ void hextoubyte(string str, ref ubyte[16] target) {
 	for(int i=0; i<32; i+=2)
 		target[i/2] = to!ubyte(str[i..i+2],16);
 }
+
+
+
+string writeobj(M...)(dbentry e) {
+	string s;
+	foreach (int i,string m; M) {
+		s ~= writeobj!(m)(e);
+		if (i < M.length-1) s ~= ", ";
+	}
+	return s;
+}
+
+string writeobj(string member)(dbentry e) {
+	string s;
+	s = `"` ~ member ~ `": `;
+
+	static if ( is(typeof(__traits(getMember, e, member)) == string) )
+		s ~= `"` ~ jsonescape(__traits(getMember, e, member)) ~ `"`;
+	else static if ( is(typeof(__traits(getMember, e, member)) == ubyte[16]) ) {
+		s ~= `"` ~ toHexString(__traits(getMember, e, member)) ~ `"`;
+		/*
+		writeln("\nbegin");
+		writeln("orig: ", __traits(getMember, e, member));
+		string test = toHexString(__traits(getMember, e, member));
+		writeln("hex: ", test);
+		ubyte[16] a,b;
+		for(int i=0; i<32; i+=2)
+			a[i/2] = to!ubyte(test[i..i+2],16);
+		writeln("back: ", a);
+		hextoubyte(test,b);
+		writeln("func: ", b);
+		*/
+	}
+	else
+		s ~= to!string(__traits(getMember, e, member));
+
+	return s;
+}
+
 
 /** Handle illegal json chars (not actually illegal, but most json's can't handle it?)
 	Replace all control characters with #XX where XX is it's hex representation

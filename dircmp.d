@@ -2,9 +2,8 @@
 -output parsable text for GUIs
 -diff device concurrency
 -output multiple duplicate matches
--treat symlinks as files
--eliminate unique-sized b-files during scan
--option to cache md5 data between runs
+-treat symlinks as "text" files
+-enable md5 cache by default?
 */
 
 import std.stdio;
@@ -13,10 +12,12 @@ import std.array;
 import std.string;
 import std.conv;
 import std.getopt;
-import std.parallelism;
+//import std.parallelism;
 import std.json;
 import std.regex;
 import core.sys.posix.signal;
+import std.file;
+import std.c.stdlib : exit;
 
 //ugh, a linker error if I use the definition from globals.d??
 import std.typecons;
@@ -75,14 +76,15 @@ int[2] removeflagged(ref dbIndex[] k, bool clearentry=false) {
 
 
 void output(string duptype, string method, dbIndex key, dbIndex key2=-1) {
-	string outstring = format("%s (%s): %s%s", duptype, method, tohostpath(key), key2==-1 ? "" : delim ~ tohostpath(key2));
+	//key2 = -1 for logging uniques
+	string outstring = format("%s (%s): %s%s", duptype, method, tohostpath(key), key2==-1 ? "" : options.delim ~ tohostpath(key2));
 	results[duptype][key] = key2;
 
 
-	if (stdouttypes.get(duptype,false) && !quiet)
+	if (options.stdouttypes.get(duptype,false) && !options.quiet)
 		writeln(outstring);
 
-	if (!noresults)
+	if (!options.noresults)
 		filelog.writeln(outstring);
 
 	if(duptype != "probable-duplicate" && duptype != "probable-unique") {
@@ -105,10 +107,10 @@ int outputallunique(string method, dbIndex[] keys, bool delegate(dbIndex i) test
 	return count;
 }
 
-void outputstats(ulong afiles, string dir=null, string delim="\t") {
+void outputstats(ulong numafiles, string dir=null, bool cache=false, string delim="\t") {
 	int processedcount = 0;
 	log();
-	log(afiles, " files scanned in directories of interest at start.");
+	log(numafiles, " files scanned in directories of interest at start.");
 
 	bool[string] hidezero = ["probable-unique":true, "probable-duplicate":true, "zero":true, "duplicate-hardlink":true];
 	int[string] statsorder;
@@ -129,11 +131,11 @@ void outputstats(ulong afiles, string dir=null, string delim="\t") {
 
 		//file output
 		//TODO: user customize sort
-		if (!noresults && dir!=null && results[typ].length) {
+		if (!options.noresults && dir!=null && results[typ].length) {
 			auto keys = results[typ].keys;
 			sort!((a,b)=> dball[a].path < dball[b].path)(keys);
 			
-			auto f = File(dir ~ fileprefix ~ typ ~ ".txt", "w");
+			auto f = File(dir ~ options.fileprefix ~ typ ~ ".txt", "w");
 			foreach(k; keys) {
 				auto v=results[typ][k];
 				if (v == -1)
@@ -144,14 +146,16 @@ void outputstats(ulong afiles, string dir=null, string delim="\t") {
 		}
 	}
 
-	if (!noresults && dir!=null && extraresults["checkcorrupt"].length) {
-		auto f = File(dir ~ fileprefix ~ "checkcorrupt.txt", "w");
+	if (!options.noresults && dir!=null && extraresults["checkcorrupt"].length) {
+		auto f = File(dir ~ options.fileprefix ~ "checkcorrupt.txt", "w");
 		foreach(k,v; extraresults["checkcorrupt"])
 			f.writeln(tohostpath(k), delim, tohostpath(v));
 	}
-
+	
 	log(processedcount, " - Total processed.");
-	assert(afiles==processedcount);
+	assert(numafiles==processedcount);
+	
+	if (options.cache) outputcachefile(dir ~ options.fileprefix ~ "md5cache");
 }
 
 
@@ -202,40 +206,12 @@ dbIndex NameMatch(dbIndex k1, dbIndex[] klist) {
 }
 
 
-
-string writeobj(string member)(dbentry e) {
-	string s;
-	s = `"` ~ member ~ `": `;
-
-	static if ( is(typeof(__traits(getMember, e, member)) == string) )
-		s ~= `"` ~ __traits(getMember, e, member) ~ `"`;
-	else static if ( is(typeof(__traits(getMember, e, member)) == ubyte[16]) ) {
-		s ~= `"` ~ toHexString(__traits(getMember, e, member)) ~ `"`;
-		/*
-		writeln("\nbegin");
-		writeln("orig: ", __traits(getMember, e, member));
-		string test = toHexString(__traits(getMember, e, member));
-		writeln("hex: ", test);
-		ubyte[16] a,b;
-		for(int i=0; i<32; i+=2)
-			a[i/2] = to!ubyte(test[i..i+2],16);
-		writeln("back: ", a);
-		hextoubyte(test,b);
-		writeln("func: ", b);
-		*/
-	}
-	else
-		s ~= to!string(__traits(getMember, e, member));
-
-	return s;
-}
-
-void outputjson() {
-	auto filename = resultsdir ~ fileprefix ~ "json";
+void outputjson(string resultsdir) {
+	auto filename = resultsdir ~ options.fileprefix ~ "json";
 	log("Dumping json data to ", filename);
 	auto w = File(filename,"w");
-	w.writefln(`{ "testfile":"generated", "skipmd5":%s, "probables":"%s" }`, 
-		skipmd5?"true":"false", probs);
+	w.writefln(`{ "testfile":"generated", "skipmd5":%s, "probables":"%s", "midsize":%d }`, 
+		options.skipmd5?"true":"false", probs, options.midsize);
 	foreach(k,e; dball) {
 		string s;
 		string[] pairs = [
@@ -302,6 +278,65 @@ void testoutput(string testpath) {
 
 
 
+void outputcachefile(string filename) {
+	if (exists(filename)) rename(filename, filename ~ "~");
+	
+	//log("Dumping md5 cache data to ", filename);
+	auto newf = File(filename,"w");
+	newf.writefln(`{ "midsize":%d }`, options.midsize);
+	
+	//reset and use harddb to find all unique inodes;
+	harddb = null;
+	foreach(k,e; dball) {
+		if (!e.midfilled && !e.md5filled) continue;
+		auto hlkey = MHardlink(e.machine, e.device, e.inode);
+		harddb[hlkey] = [k];
+	}
+	
+	string jsonentry(dbentry e) {
+		string host;
+		string s = writeobj!("mtime","device","inode","size","mid","md5","midfilled","md5filled")(e);
+		if (e.machine != 0)
+			host = `"host":"` ~ jsonescape(machinedb[e.machine].hostname) ~ `", `;
+		return ("{" ~ host ~ s ~ "}");
+	}
+	
+	void checkcache(dbentry dbe, string line) {
+		auto hlold = MHardlink(dbe.machine, dbe.device, dbe.inode);
+		if (hlold in harddb) {
+			/*
+			compare old new
+			-if diff mtime/size, use new
+			-if same mtime/size, check mid/md5filled
+				-if new and old filled, verify equal, otherwise checkcorrupt msg?
+				-if old filled, new not filled, use old
+				(shouldn't happen, used cache earlier)
+			
+			auto ne = dball[harddb[hlold][0]];
+			if (ne.mtime == dbe.mtime && ne.size == dbe.size) {
+				
+			}
+			*/
+		} else {
+			newf.write(line); //copy line if we don't know about it
+			//newf.writeln(jsonentry(dbe));
+		}
+	}
+	readmd5cache(filename ~ "~", &checkcache);
+	
+	foreach(v; harddb) {
+		auto e = dball[v[0]];
+		if (e.size == 0) continue;
+		if (e.midfilled == 0 && e.md5filled == false) continue;
+		newf.writeln(jsonentry(e));
+	}
+}
+
+
+
+
+
+
 
 
 
@@ -314,28 +349,29 @@ int main(string[] args) {
 	results["probable-duplicate"] = null;
 	extraresults["checkcorrupt"] = null;
 
-	stdouttypes = ["unique":false, "probable-unique":false, "duplicate":false, "probable-duplicate":false];
+	options.stdouttypes = ["unique":false, "probable-unique":false, "duplicate":false, "probable-duplicate":false];
 	string[] consoleshowtypes;
 
-	uint midsize = 4096;
+	options.midsize = 4096;
 	
 	bool server = false;
 	bool finddupsearly = false;
-	skipmd5 = false;
+	options.skipmd5 = false;
 	bool iknowwhatimdoing = false;
 	bool jsonresults = false;
-	noresults = false;
-	quiet = false;
-	noprogressbar = false;
-	fileprefix = "dircmp-results.";
-	resultsdir = "./";
-	delim = "\t";
+	options.noresults = false;
+	options.quiet = false;
+	options.noprogressbar = false;
+	options.fileprefix = "dircmp-results.";
+	options.resultsdir = "./";
+	options.delim = "\t";
+	options.cache = false;
 	string[] leftdirs,rightdirs,leftrdirs,rightrdirs,afiles,bfiles,a1files;
 	string[] dumpndirs,dumprdirs;
 	string dumpfile = "dircmp.dump";
 	string testpath;
 
-	noprogressbar = false;
+	options.noprogressbar = false;
 	
 	
 	machinedb ~= hostdbentry.init;	//machinedb[0] reserved
@@ -390,7 +426,7 @@ will be generated.
                 probable-unique, probable-duplicate, zero
 
 EOS");
-		std.c.stdlib.exit(-1);
+		exit(-1);
 	}
 
 	try {
@@ -398,8 +434,8 @@ EOS");
 			"help|h", std.functional.toDelegate(&helpoutput),
 			"finddupsearly|ssd",&finddupsearly,
 			"consoleshow|c",&consoleshowtypes,
-			"quiet|q",&quiet,
-			"noprogressbar",&noprogressbar,
+			"quiet|q",&options.quiet,
+			"noprogressbar",&options.noprogressbar,
 			"a1",&a1files,
 			"an",&leftdirs,
 			"bn",&rightdirs,
@@ -407,18 +443,19 @@ EOS");
 			"br", &rightrdirs,
 			"af", &afiles,
 			"bf", &bfiles,
-			"skipmd5", &skipmd5,
+			"skipmd5", &options.skipmd5,
 			"probables", &probs,
-			"midsize|ms", &midsize,
-			"noresults", &noresults,
-			"resultsdir", &resultsdir,
-			"delim", &delim,
+			"midsize|ms", &options.midsize,
+			"noresults", &options.noresults,
+			"resultsdir", &options.resultsdir,
+			"delim", &options.delim,
 			"dumpn", &dumpndirs,
 			"dumpr", &dumprdirs,
 			"dumpfile", &dumpfile,
 			"iknowwhatimdoing", &iknowwhatimdoing,
 			"server", &server,
 			"runtest", &testpath,
+			"cache", &options.cache,
 			"jsonresults|json", &jsonresults,
 			//std.getopt.config.caseInsensitive)
 			std.getopt.config.caseSensitive);
@@ -430,29 +467,30 @@ EOS");
 	if (server) runserver();
 
 	if (testpath) {
-		//quiet=true;
-		noprogressbar=true;
-		noresults=true;
-		resultsdir = "";
+		//options.quiet=true;
+		options.noprogressbar=true;
+		options.noresults=true;
+		options.resultsdir = "";
 		runtest(testpath);
 		goto startcomparison;
 	}
 	
-	if(resultsdir[$-1] != '/')
-		resultsdir ~= '/';
-	if(noresults || dumpndirs.length || dumprdirs.length) {
-		noresults = true;
-		resultsdir = "";
+	if(options.resultsdir[$-1] != '/')
+		options.resultsdir ~= '/';
+	if(options.noresults || dumpndirs.length || dumprdirs.length) {
+		options.noresults = true;
+		options.resultsdir = "";
 	} else
-		filelog = File(resultsdir ~ fileprefix ~ "log.txt", "w");
-	if(quiet)
-		noprogressbar=true;
+		filelog = File(options.resultsdir ~ options.fileprefix ~ "log.txt", "w");
+	if(options.quiet)
+		options.noprogressbar=true;
 
 	foreach(c; consoleshowtypes)
-		stdouttypes[c] = true;
+		options.stdouttypes[c] = true;
 	
 	if (dumpndirs.length + dumprdirs.length > 0) {
 		dbIndex[] keys;
+		harddb = null;
 
 		foreach (dir;dumpndirs) dirscan(true, dir, false);
 		foreach (dir;dumprdirs) dirscan(true, dir, true);
@@ -467,12 +505,12 @@ EOS");
 				harddb[hlkey] = s.dup;
 		}
 
-		midscanall(keys, midsize);
+		midscanall(keys, options.midsize);
 
 		keys = null;
 
 		writeln();
-		if (!skipmd5) {
+		if (!options.skipmd5) {
 			double sizesum=0, totalsize=0;
 			foreach (k, ref v; dball) {
 				if (!v.md5filled) keys ~= k;
@@ -534,39 +572,47 @@ EOS");
 		std.c.stdlib.exit(-1);
 	}
 	/*
-	if (skipmd5 && !iknowwhatimdoing) {
+	if (options.skipmd5 && !iknowwhatimdoing) {
 		writeln("--skip-md5 requires command line option --iknowwhatimdoing.");
 		std.c.stdlib.exit(-1);
 	}
 	*/
-	if(!noresults && !isValidPath(resultsdir)) {
+	if(!options.noresults && !isValidPath(options.resultsdir)) {
 		writeln("Invalid results directory path.");
 		std.c.stdlib.exit(-1);
 	}
-
+	
+	if (options.cache) loadmd5cachedb(options.resultsdir ~ options.fileprefix ~ "md5cache");
+	
 	foreach(f;a1files) {
 		singlefilescan(f);
 	}
 
 	foreach (dir;leftdirs) {
-		if (auto m = match(dir,hasHost)) remotedirscan(m.captures[1], true, m.captures[2], false);
+		if (auto m = match(dir,hasHost)) 
+			remotedirscan(remoteconnect(m.captures[1]), true, m.captures[2], false);
 		else dirscan(true, dir, false);
 	}
 	foreach (dir;leftrdirs) {
-		if (auto m = match(dir,hasHost)) remotedirscan(m.captures[1], true, m.captures[2], true);
+		if (auto m = match(dir,hasHost)) 
+			remotedirscan(remoteconnect(m.captures[1]), true, m.captures[2], true);
 		else dirscan(true, dir, true);
 	}
+	foreach (file;afiles) readdump(true, file, 0);
+	
 	foreach (dir;rightdirs) {
-		if (auto m = match(dir,hasHost)) remotedirscan(m.captures[1], false, m.captures[2], false);
+		if (auto m = match(dir,hasHost)) 
+			remotedirscan(remoteconnect(m.captures[1]), false, m.captures[2], false);
 		else dirscan(false, dir, false);
 	}
 	foreach (dir;rightrdirs) {
-		if (auto m = match(dir,hasHost)) remotedirscan(m.captures[1], false, m.captures[2], true);
+		if (auto m = match(dir,hasHost)) 
+			remotedirscan(remoteconnect(m.captures[1]), false, m.captures[2], true);
 		else dirscan(false, dir, true);
 	}
-	foreach (file;afiles) readdump(true, file, 0);
 	foreach (file;bfiles) readdump(false, file, 0);
 	
+	md5cachedb = null;  //done with it, free the memory
 	dball.rehash;
 
 /*
@@ -660,10 +706,10 @@ startcomparison:
 
 //---scan mid md5
 	//TODO: feature: use alternate file section if mid is all 0x00 or 0xFF; use last bytes(?)
-	log("\nScanning middle ", midsize, " bytes on all remaining files.");
+	log("\nScanning middle ", options.midsize, " bytes on all remaining files.");
 
 	speedrate = new SpeedRate();
-	midscanall(keys, midsize);
+	midscanall(keys, options.midsize);
 	log();
 
 //***mid md5
@@ -679,7 +725,7 @@ startcomparison:
 	SetIter sets = new SetIter(keys, [compmid]);
 	foreach(s; sets) {
 		assert(s.length > 1);
-		if (dball[s[0]].size > midsize) break;
+		if (dball[s[0]].size > options.midsize) break;
 		
 		auto spl = splitdirs(s);
 		assert(spl[true].length && spl[false].length);  //uniques eliminated in last step
@@ -688,7 +734,7 @@ startcomparison:
 			foreach(dn; spl[false]) dball[dn].flag = true;
 			
 			auto k = NameMatch(i, spl[false]);
-			assert(dball[i].size <= midsize);
+			assert(dball[i].size <= options.midsize);
 			assert(!dball[k].dir1);
 			assert(dball[i].dir1);
 			assert(dball[i].md5filled);
@@ -780,10 +826,10 @@ startcomparison:
 		log();
 	}
 	
-	if(skipmd5) {
-		outputstats(leftfiles,resultsdir,delim);
+	if(options.skipmd5) {
+		outputstats(numafiles,options.resultsdir,options.cache,options.delim);
 		if (testpath) testoutput(testpath);
-		if (jsonresults) outputjson();
+		if (jsonresults) outputjson(options.resultsdir);
 		std.c.stdlib.exit(0);
 	}
 
@@ -828,7 +874,6 @@ startcomparison:
 		totalsize += dball[s[0]].size;
 
 	
-	
 	SortBy dirhl;
 	if (finddupsearly) dirhl = new SortBy([compmid, compdir, compmachine, comphardlink]);
 	else dirhl = new SortBy([compdir, compmachine, comphardlink]);
@@ -841,7 +886,7 @@ startcomparison:
 	speedrate = new SpeedRate();
 md5search:
 	foreach(dbIndex k; keys) {
-		assert(dball[k].size > midsize);
+		assert(dball[k].size > options.midsize);
 
 		//skipflagged
 		if (dball[k].flag) {
@@ -972,10 +1017,10 @@ md5search:
 			writeln("Uh oh!  Should have no files left.  Please submit bug report.");
 	}
 
-	outputstats(leftfiles, resultsdir, delim);
+	outputstats(numafiles, options.resultsdir, options.cache, options.delim);
 	
 	if (testpath) testoutput(testpath);
-	if (jsonresults) outputjson();
+	if (jsonresults) outputjson(options.resultsdir);
 	
 	return 0;
 }

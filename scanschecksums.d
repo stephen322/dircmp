@@ -20,7 +20,7 @@ import progress;
 //TODO: permissions exception
 //TODO: warn/exit on directories in both left and right
 void dirscan(bool doi, string dir, bool recursive) {
-	ulong numfiles=0;
+	ulong numfiles=0, numcached;
 	ulong totalsize=0;
 	foreach (DirEntry e; dirEntries(dir, recursive?SpanMode.breadth:SpanMode.shallow, false)) {
 		auto a = e.linkAttributes();
@@ -37,21 +37,33 @@ void dirscan(bool doi, string dir, bool recursive) {
 				size = tmp.st_size;
 				dir1 = doi;
 
+				auto hlkey = MHardlink(machine, device, inode);
+				if (hlkey in md5cachedb) {
+					auto ce = md5cachedb[hlkey];
+					if (ce.mtime == mtime && ce.size == size) {
+						midfilled = ce.midfilled;
+						mid = ce.mid;
+						md5filled = ce.md5filled;
+						md5 = ce.md5;
+						++numcached;
+					}
+				}
+				
 				totalsize += size;
 			}
 			++numfiles;
-			if (doi) ++leftfiles;
-			else ++rightfiles;
+			if (doi) ++numafiles;
 			++globalindex;
 		}
 	}
-	totalfiles+=numfiles;
+	
 	log(format("%d (%s) files in %s", numfiles, doi?"A":"B", dir));
+	if (numcached > 0) log(format("\tCached entries found: %d", numcached));
 	log(format("\t%d bytes.", totalsize));
 }
 
 void singlefilescan(string filename) {
-	ulong totalsize=0;
+	ulong totalsize=0, numcached;
 	
 	auto e = DirEntry(filename);
 	auto a = e.linkAttributes();
@@ -67,13 +79,25 @@ void singlefilescan(string filename) {
 			inode = tmp.st_ino;
 			size = tmp.st_size;
 			dir1 = true;
+			
+			auto hlkey = MHardlink(machine, device, inode);
+			if (hlkey in md5cachedb) {
+				auto ce = md5cachedb[hlkey];
+				if (ce.mtime == mtime && ce.size == size) {
+					midfilled = ce.midfilled;
+					mid = ce.mid;
+					md5filled = ce.md5filled;
+					md5 = ce.md5;
+					++numcached;
+				}
+			}
 
 			totalsize += size;
 		}
-		++leftfiles;
+		++numafiles;
 		++globalindex;
-		totalfiles++;
 		log(format("(A) file: %s", e.name()));
+		if (numcached) log(format("\tCached"));
 		log(format("\t%d bytes.", totalsize));
 	}
 	else {
@@ -81,7 +105,7 @@ void singlefilescan(string filename) {
 	}
 }
 
-ProcessPipes remoteconnect(string host) {
+int remoteconnect(string host) {
 	auto rsh_cmd = environment.get("DIRCMP_RSH");
 	if (rsh_cmd == null)
 		rsh_cmd = "ssh -C %H dircmp --server";
@@ -94,7 +118,10 @@ ProcessPipes remoteconnect(string host) {
 		rsh = rsh_cmd ~ " " ~ host ~ " dircmp --server";
 
 	ProcessPipes pipes = pipeShell(rsh);
-	machinedb ~= hostdbentry(host,pipes);
+	auto index = cast(int)machinedb.length;
+	machinedb ~= hostdbentry(host,pipes,index);
+	machlu[host] = cast(ubyte)(index);
+	
 	//scope(exit) wait(pipes.pid);
 
 	/*
@@ -104,14 +131,18 @@ ProcessPipes remoteconnect(string host) {
 		exit(-1);
 	}
 	*/
-	return pipes;
+	return index;
 }
 
-void remotedirscan(string host, bool doi, string dir, bool recurse) {
-	ulong numfiles=0, totalsize=0;
+void remotedirscan(int mindex, bool doi, string dir, bool recurse) {
+	ulong numfiles=0, totalsize=0, numcached;
 	long result=-999;
 
-	auto pipes = remoteconnect(host);
+	auto pipes = machinedb[mindex].conn;
+	
+	//FIXME: very ugly, have to re-read md5cache file
+	if (options.cache)
+		loadmd5cacheremote(options.resultsdir ~ options.fileprefix ~ "md5cache", cast(ubyte)mindex);
 	
 	pipes.stdin.writefln(`{ "func":"dirscan", "indexstart":%d, "dir":"%s", "recurse":%s }`, 
 		globalindex, jsonescape(dir), recurse?"true":"false");
@@ -134,7 +165,19 @@ void remotedirscan(string host, bool doi, string dir, bool recurse) {
 			size = cast(ulong) j["size"].integer;
 
 			dir1 = doi;
-			machine = cast(ubyte)(machinedb.length - 1);
+			machine = cast(ubyte)(mindex);
+			
+			auto hlkey = MHardlink(machine, device, inode);
+			if (hlkey in md5cachedb) {
+				auto ce = md5cachedb[hlkey];
+				if (ce.mtime == mtime && ce.size == size) {
+					midfilled = ce.midfilled;
+					mid = ce.mid;
+					md5filled = ce.md5filled;
+					md5 = ce.md5;
+					++numcached;
+				}
+			}
 
 			totalsize+=size;
 		}
@@ -150,10 +193,67 @@ void remotedirscan(string host, bool doi, string dir, bool recurse) {
 		exit(-1);
 	}
 
-	totalfiles+=numfiles;
-	log(format("%d (%s) files in %s", numfiles, doi?"A":"B", host ~ ":" ~ dir));
+	log(format("%d (%s) files in %s", numfiles, doi?"A":"B", machinedb[mindex].hostname ~ ":" ~ dir));
+	if (numcached > 0) log(format("\tCached entries found: %d", numcached));
 	log(format("\t%d bytes.", totalsize));
 }
+
+void readmd5cache(string filename, void delegate(dbentry,string) callback) {
+	if (!exists(filename))
+		return;
+	
+	auto f = File(filename,"r");
+	string line, hostname;
+	while ((line = f.readln()) !is null) {
+		auto j = parseJSON(line);
+		if ("midsize" in j.object) {
+			if (j["midsize"].integer != options.midsize) {
+				stderr.writeln(`"midsize" mismatch.  Delete cache files or adjust midsize accordingly.`);
+				exit(-1);
+			}
+			continue;
+		}
+		
+		dbentry dbe;
+		with (dbe) {
+			if ("host" in j.object) {
+				hostname = j["host"].str;
+				if (hostname in machlu) machine = machlu[hostname];
+				else continue;
+			} else {
+				machine = 0;
+			}
+			mtime = cast(time_t) j["mtime"].integer;
+			device = cast(dev_t) j["device"].integer;
+			inode = cast(ino_t) j["inode"].integer;
+			size = cast(ulong) j["size"].integer;
+			if ("mid" in j.object) hextoubyte(j["mid"].str, mid);
+			if ("md5" in j.object) hextoubyte(j["md5"].str, md5);
+			midfilled = cast(ubyte) j["midfilled"].integer;
+			md5filled = j["md5filled"].type == JSON_TYPE.TRUE ? true : false;
+		}
+		callback(dbe, line);
+	}
+}
+
+void loadmd5cacheremote(string filename, ubyte machine) {
+	void fill(dbentry e, string line) {
+		if (e.machine != machine)
+			return;
+		auto hlkey = MHardlink(e.machine, e.device, e.inode);
+		md5cachedb[hlkey] = e;
+	}
+	readmd5cache(filename, &fill);
+}
+
+void loadmd5cachedb(string filename) {
+	void fill(dbentry e, string line) {
+		auto hlkey = MHardlink(e.machine, e.device, e.inode);
+		md5cachedb[hlkey] = e;
+	}
+	readmd5cache(filename, &fill);
+}
+
 
 void readdump(bool doi, string file, ubyte machnum=1, bool testmode=false) {
 	ulong numfiles=0;
@@ -186,7 +286,8 @@ void readdump(bool doi, string file, ubyte machnum=1, bool testmode=false) {
 					default: stderr.writeln("Unknown probables type.");
 				}
 			}
-			if ("skipmd5" in j.object) skipmd5 = j["skipmd5"].type == JSON_TYPE.TRUE ? true : false;
+			if ("skipmd5" in j.object) options.skipmd5 = j["skipmd5"].type == JSON_TYPE.TRUE ? true : false;
+			if ("midsize" in j.object) options.midsize = cast(uint)j["midsize"].integer;
 			continue;
 		}
 		if ("test" in j.object) {
@@ -236,8 +337,7 @@ void readdump(bool doi, string file, ubyte machnum=1, bool testmode=false) {
 			totalsize+=size;
 		}
 		++numfiles;
-		if (doi) ++leftfiles;
-		else ++rightfiles;
+		if (doi) ++numafiles;
 		//writeln(dball[globalindex]);
 		++globalindex;
 		} catch(Exception e) {
@@ -245,7 +345,6 @@ void readdump(bool doi, string file, ubyte machnum=1, bool testmode=false) {
 		}
 		
 	}
-	totalfiles+=numfiles;
 	log(format("%d files in %s", numfiles, file));
 	log(format("\t%d bytes.", totalsize));
 }
@@ -373,7 +472,7 @@ void midscanall(dbIndex[] keys, int midsize, void delegate(dbIndex) dg = null) {
 	}
 
 	renderprogress(keys.length, keys.length, "files");
-	if (!quiet) writeln();
+	if (!options.quiet) writeln();
 }
 
 void md5fillharddb(dbIndex k) {
@@ -381,22 +480,23 @@ void md5fillharddb(dbIndex k) {
 	auto hlkey = MHardlink(dball[k].machine, dball[k].device, dball[k].inode);
 	if (hlkey in harddb)
 	foreach(hl; harddb[hlkey]) {
-		if (hl == k || dball[hl].md5filled) continue;
+		if (dball[hl].md5filled) continue;
 		dball[hl].md5[] = dball[k].md5;
 		dball[hl].md5filled = dball[k].md5filled;
 	}
 }
 
 void md5file(dbIndex k, ref double sizesum, double totalsize) {
-	if (dball[k].md5filled) return;
-
+	if (dball[k].md5filled)
+		return;
+	
 	MD5 calcmd5;
 	auto f = File(dball[k].path, "rb");
 	calcmd5.start();
 	uint j=0;
 	foreach (buffer; f.byChunk(64 * 1024)) {
 		if (ctrlc) {
-			if (!quiet) writeln("\nSIGINT caught");
+			if (!options.quiet) writeln("\nSIGINT caught");
 			return;
 		}
 		calcmd5.put(buffer);

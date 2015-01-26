@@ -89,7 +89,7 @@ class SpeedRate {
 
 void progress_console(double cur, double total, string units, string text="") {
 	static ulong lastline;
-	if (noprogressbar)
+	if (options.noprogressbar)
 		return;
 
 	synchronized {
@@ -117,7 +117,7 @@ void progress_console(double cur, double total, string units, string text="") {
 }
 
 void progress_json(double cur, double total, string units, string text="") {
-	if (noprogressbar)
+	if (options.noprogressbar)
 		return;
 
 	if (speedrate.peekmsecs() < 500 && cur!=total) return;
