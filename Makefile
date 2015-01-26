@@ -1,13 +1,17 @@
 SOURCES=dircmp.d scanschecksums.d server.d globals.d progress.d
-OBJECTS=$(SOURCES:.d=.o)
+#OBJECTS=$(SOURCES:.d=.o)
 
 all: dircmp
 
-dircmp: $(OBJECTS)
-	gdc -o dircmp $(OBJECTS)
+#dircmp: $(OBJECTS)
+#	gdc -o dircmp $(OBJECTS)
+#
+#%.o: %.d
+#	gdc -O2 -c $< -o $@
 
-%.o: %.d
-	gdc -O2 -c $< -o $@
+dircmp: $(SOURCES)
+	gdc -o dircmp $(SOURCES)
+
 
 install: dircmp
 	strip dircmp
