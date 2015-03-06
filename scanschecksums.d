@@ -183,6 +183,7 @@ void remotedirscan(int mindex, bool doi, string dir, bool recurse) {
 		}
 		assert(globalindex==j["index"].integer);
 		dball[globalindex] = dbe;
+		if (doi) ++numafiles;
 		++globalindex; ++numfiles;
 		//writeln(dball[globalindex-1]);
 		
